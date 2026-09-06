@@ -43,7 +43,7 @@ func NewEngine(dir string) (*Engine, error) {
 			v := make([]byte, len(value))
 			copy(k, key)
 			copy(v, value)
-			engine.activeMem.Put(k, v)
+			engine.activeMem.Put(k, v, memtable.ActType(et))
 		}
 	})
 
@@ -61,7 +61,7 @@ func (e *Engine) Put(key, value []byte) error {
 	defer e.mu.Unlock()
 
 	// Memtable に書く
-	e.activeMem.Put(key, value)
+	e.activeMem.Put(key, value, memtable.PutType)
 
 	// サイズチェック
 	// 閾値超過で Flush トリガー
@@ -74,6 +74,24 @@ func (e *Engine) Put(key, value []byte) error {
 		// ImmutableMem を Flush するスレッドを起動
 		go e.flushImmutableMemtable()
 	}
+	return nil
+}
+
+// Delete は指定されたキーを削除する
+func (e *Engine) Delete(key []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// WAL に書く
+	if err := e.wal.Write(wal.DeleteType, key, nil); err != nil {
+		return err
+	}
+
+	// Memtable に削除マーカー()を追加
+	e.activeMem.Put(key, nil, memtable.DeleteType)
+
+	// Delete ではサイズチェックは不要
+
 	return nil
 }
 
@@ -107,31 +125,29 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	defer e.mu.RUnlock()
 
 	// まずActive Memtable をチェック
-	if val, ok := e.activeMem.Get(key); ok {
+	if val, act, ok := e.activeMem.Get(key); ok && act != memtable.DeleteType {
 		return val, true
 	}
 
 	// 次いで Immutable Memtable をチェック
 	if e.immutableMem != nil {
-		if val, ok := e.immutableMem.Get(key); ok {
+		if val, act, ok := e.immutableMem.Get(key); ok && act != memtable.DeleteType {
 			return val, true
 		}
 	}
 
-	/*
-		// 最後に SSTables をチェック
-		for i := e.sstCount; i >= 1; i-- {
-			path := filepath.Join(e.dir, fmt.Sprintf("%05d.sst", i))
-			reader, _ := sstable.NewReader(path)
-			if val, ok, err := reader.Get(key); ok {
-				if err != nil {
-					log.Printf("Error reading from SSTable: %v\n", err)
-					return nil, false
-				}
-				return val, true
+	// 最後に SSTables をチェック
+	for i := e.sstCount; i >= 1; i-- {
+		path := filepath.Join(e.dir, fmt.Sprintf("%05d.sst", i))
+		reader, _ := sstable.NewReader(path)
+		if val, ok, err := reader.Get(key); ok {
+			if err != nil {
+				log.Printf("Error reading from SSTable: %v\n", err)
+				return nil, false
 			}
+			return val, true
 		}
-	*/
+	}
 	return nil, false
 }
 

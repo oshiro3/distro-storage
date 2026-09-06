@@ -6,15 +6,21 @@ import (
 	"sync"
 )
 
+type ActType byte
+
 const (
 	maxLevel    = 12   // Skip List の最大高さ
 	probability = 0.25 // 新しいレベルを追加する確率
+
+	PutType    ActType = 1
+	DeleteType ActType = 2
 )
 
 // Node は Skip List のノードを表します
 type Node struct {
 	key   []byte
 	value []byte
+	act   ActType
 	next  []*Node // 各レベルの次のノードへのポインタ
 }
 
@@ -45,7 +51,7 @@ func (m *Memtable) randomLevel() int {
 }
 
 // Put はキーと値のペアを挿入または更新する
-func (m *Memtable) Put(key, value []byte) {
+func (m *Memtable) Put(key, value []byte, act ActType) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -68,6 +74,7 @@ func (m *Memtable) Put(key, value []byte) {
 		m.size -= uint32(len(curr.value))
 		m.size += uint32(len(value))
 		curr.value = value
+		curr.act = act
 		return
 	}
 
@@ -91,11 +98,11 @@ func (m *Memtable) Put(key, value []byte) {
 		update[i].next[i] = newNode
 	}
 	m.length++
-	m.size += uint32(len(key) + len(value) + 8) // ポインタ分のオーバーヘッドを追加
+	m.size += uint32(len(key) + len(value) + 8 + 8) // ポインタ分のオーバーヘッドを追加
 }
 
 // Get は指定されたキーに対応する値を返します
-func (m *Memtable) Get(key []byte) ([]byte, bool) {
+func (m *Memtable) Get(key []byte) ([]byte, ActType, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -108,9 +115,9 @@ func (m *Memtable) Get(key []byte) ([]byte, bool) {
 
 	current = current.next[0]
 	if current != nil && bytes.Equal(current.key, key) {
-		return current.value, true
+		return current.value, current.act, true
 	}
-	return nil, false
+	return nil, 0, false
 }
 
 // Size は Memtable の現在のサイズをバイト単位で返します
