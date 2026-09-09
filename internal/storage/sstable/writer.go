@@ -30,7 +30,7 @@ func NewWriter(path, file string) (*Writer, error) {
 
 // Add はソート済みのキー・バリューを追加します
 // (呼び出し側がソート済みであることを保証する必要があります)
-func (w *Writer) Add(key, value []byte) error {
+func (w *Writer) Add(key, value []byte, act ActType) error {
 	// log.Printf("Current Offset: %d, Current Block Size: %d", w.offset, w.currSize)
 	// 新しいブロックの開始時にインデックスを記録
 	if w.currSize == 0 || w.currSize > w.blockSize {
@@ -41,13 +41,15 @@ func (w *Writer) Add(key, value []byte) error {
 		w.currSize = 0
 	}
 
-	// データ書き込み [KeySize(4)|Key|ValSize(4)|Val]
-	kvSize := 8 + len(key) + len(value)
+	// データ書き込み [KeySize(4)|Key|ValSize(4)|Val|ActSize(1)|Act]
+	kvSize := 8 + len(key) + len(value) + 1
 	buf := make([]byte, kvSize)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(key)))
 	copy(buf[4:], key)
 	binary.LittleEndian.PutUint32(buf[4+len(key):8+len(key)], uint32(len(value)))
 	copy(buf[8+len(key):], value)
+	binary.LittleEndian.PutUint32(buf[8+len(key)+len(value):], 1)
+	copy(buf[8+len(key)+len(value)+4:], []byte{byte(act)})
 
 	n, err := w.file.Write(buf)
 	if err != nil {

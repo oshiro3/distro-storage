@@ -1,8 +1,13 @@
 package sstable
 
+type ActType byte
+
 const (
 	LEVEL0_MAXFILES = 4
 	LEVEL1_MAXFILES = 4
+
+	ActTypePut ActType = iota
+	ActTypeDelete
 )
 
 // シンプルな SSTable レイアウト:

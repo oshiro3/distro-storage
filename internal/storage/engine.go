@@ -61,7 +61,7 @@ func (e *Engine) Put(key, value []byte) error {
 	defer e.mu.Unlock()
 
 	// Memtable に書く
-	e.activeMem.Put(key, value, memtable.PutType)
+	e.activeMem.Put(key, value, memtable.ActTypePut)
 
 	// サイズチェック
 	// 閾値超過で Flush トリガー
@@ -88,7 +88,7 @@ func (e *Engine) Delete(key []byte) error {
 	}
 
 	// Memtable に削除マーカー()を追加
-	e.activeMem.Put(key, nil, memtable.DeleteType)
+	e.activeMem.Put(key, nil, memtable.ActTypeDelete)
 
 	// Delete ではサイズチェックは不要
 
@@ -111,7 +111,7 @@ func (e *Engine) flushImmutableMemtable() {
 
 	// Memtable から全エントリを取り出して SSTable へ
 	for _, entry := range mem.AllEntries() {
-		writer.Add(entry.K, entry.V)
+		writer.Add(entry.Key, entry.Value, sstable.ActType(entry.Act))
 	}
 	writer.Finish()
 
@@ -125,13 +125,13 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	defer e.mu.RUnlock()
 
 	// まずActive Memtable をチェック
-	if val, act, ok := e.activeMem.Get(key); ok && act != memtable.DeleteType {
+	if val, act, ok := e.activeMem.Get(key); ok && act != memtable.ActTypeDelete {
 		return val, true
 	}
 
 	// 次いで Immutable Memtable をチェック
 	if e.immutableMem != nil {
-		if val, act, ok := e.immutableMem.Get(key); ok && act != memtable.DeleteType {
+		if val, act, ok := e.immutableMem.Get(key); ok && act != memtable.ActTypeDelete {
 			return val, true
 		}
 	}
@@ -140,12 +140,14 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	for i := e.sstCount; i >= 1; i-- {
 		path := filepath.Join(e.dir, fmt.Sprintf("%05d.sst", i))
 		reader, _ := sstable.NewReader(path)
-		if val, ok, err := reader.Get(key); ok {
+		if val, act, ok, err := reader.Get(key); ok {
 			if err != nil {
 				log.Printf("Error reading from SSTable: %v\n", err)
 				return nil, false
 			}
-			return val, true
+			if act != sstable.ActTypeDelete {
+				return val, true
+			}
 		}
 	}
 	return nil, false

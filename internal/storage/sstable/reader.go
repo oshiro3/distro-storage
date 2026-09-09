@@ -72,7 +72,7 @@ func (r *Reader) loadIndex() error {
 }
 
 // Get は指定されたキーに対応する値を返します
-func (r *Reader) Get(key []byte) ([]byte, bool, error) {
+func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 	log.Printf("SSTable Get: key=%s", string(key))
 	// バイナリサーチでインデックスを探索
 	low, high := 0, len(r.index)-1
@@ -93,22 +93,29 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 
 	// データブロックから値を読み込み
 	if _, err := r.file.Seek(int64(targetOffset), io.SeekStart); err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 
 	var keyLen uint32
 	if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	readKey := make([]byte, keyLen)
 	r.file.Read(readKey)
 
 	var valLen uint32
 	if err := binary.Read(r.file, binary.LittleEndian, &valLen); err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	value := make([]byte, valLen)
 	r.file.Read(value)
 
-	return value, true, nil
+	var valAct uint32
+	if err := binary.Read(r.file, binary.LittleEndian, &valAct); err != nil {
+		return nil, 0, false, err
+	}
+	act := make([]byte, valAct)
+	r.file.Read(act)
+
+	return value, ActType(act[0]), true, nil
 }
