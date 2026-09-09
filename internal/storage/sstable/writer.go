@@ -8,6 +8,7 @@ import (
 
 type Writer struct {
 	file      *os.File
+	level     uint
 	index     []indexEntry
 	offset    uint32
 	blockSize uint32
@@ -58,6 +59,12 @@ func (w *Writer) Add(key, value []byte, act ActType) error {
 
 	w.offset += uint32(n)
 	w.currSize += uint32(n)
+	switch w.level {
+	case 0:
+		if w.currSize >= LEVEL_0_MAXFILESIZE {
+			return FileSizeOverError
+		}
+	}
 	return nil
 }
 

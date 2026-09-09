@@ -4,6 +4,7 @@ import (
 	"distro-storage/internal/storage/memtable"
 	"distro-storage/internal/storage/sstable"
 	"distro-storage/internal/storage/wal"
+	"errors"
 	"log"
 	"path/filepath"
 
@@ -111,7 +112,36 @@ func (e *Engine) flushImmutableMemtable() {
 
 	// Memtable から全エントリを取り出して SSTable へ
 	for _, entry := range mem.AllEntries() {
-		writer.Add(entry.Key, entry.Value, sstable.ActType(entry.Act))
+		// 1. まず現在のWriterへの書き込みを試みる
+		err := writer.Add(entry.Key, entry.Value, sstable.ActType(entry.Act))
+
+		// NOTE: Recursive にしてもいいが1回しか再帰しないのでシンプルにループで処理する
+		if err != nil {
+			// エラーが FileSizeOverError かどうかを確認
+			if errors.Is(err, sstable.FileSizeOverError) {
+				// 2. サイズオーバーの場合は、現在のファイルを書き終えてクローズする
+				writer.Finish()
+
+				// 3. 次のファイル名のためにアトミックに sstCount を増やす
+				e.mu.Lock()
+				e.sstCount++
+				e.mu.Unlock()
+
+				// 4. 新しい Writer 作成する
+				writer, err = sstable.NewWriter(path, fmt.Sprintf("%05d.sst", e.sstCount))
+				if err != nil {
+					log.Printf("Error creating new SSTable during split: %v\n", err)
+					return
+				}
+
+				// 5. 書き込めなかったエントリを新しいファイルに対して再度書き込む
+				err = writer.Add(entry.Key, entry.Value, sstable.ActType(entry.Act))
+				if err != nil {
+					log.Printf("Fatal error writing to new SSTable (entry too large?): %v\n", err)
+					return
+				}
+			}
+		}
 	}
 	writer.Finish()
 
