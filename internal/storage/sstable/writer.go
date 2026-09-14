@@ -13,6 +13,9 @@ type Writer struct {
 	offset    uint32
 	blockSize uint32
 	currSize  uint32
+	minKey    []byte
+	maxKey    []byte
+	hasData   bool
 }
 
 // NewWriter は新しい SSTable ライターを作成します
@@ -32,6 +35,13 @@ func NewWriter(path, file string) (*Writer, error) {
 // Add はソート済みのキー・バリューを追加します
 // (呼び出し側がソート済みであることを保証する必要があります)
 func (w *Writer) Add(key, value []byte, act ActType) error {
+	// minKey の追跡
+	if !w.hasData {
+		w.minKey = append([]byte(nil), key...)
+		w.hasData = true
+	}
+	// ソート済みなので maxKey は常に更新
+	w.maxKey = append([]byte(nil), key...)
 	// log.Printf("Current Offset: %d, Current Block Size: %d", w.offset, w.currSize)
 	// 新しいブロックの開始時にインデックスを記録
 	if w.currSize == 0 || w.currSize > w.blockSize {
@@ -72,16 +82,29 @@ func (w *Writer) Add(key, value []byte, act ActType) error {
 func (w *Writer) Finish() error {
 	indexOffset := w.offset
 	// インデックスブロックの書き込み
+	var indexBytesWritten uint32
 	for _, entry := range w.index {
 		binary.Write(w.file, binary.LittleEndian, uint32(len(entry.key)))
 		w.file.Write(entry.key)
 		binary.Write(w.file, binary.LittleEndian, entry.offset)
+		// IndexBlock のサイズを追跡
+		indexBytesWritten += 4 + uint32(len(entry.key)) + 4
 	}
 
-	// フッターの書き込み (インデックスの開始位置を記録)
-	footer := make([]byte, 8)
+	// メタデータ (SSTableMeta) ブロックの書き込み
+	metaOffset := indexOffset + indexBytesWritten
+	// MinKey [KeySize(4) | MinKey]
+	binary.Write(w.file, binary.LittleEndian, uint32(len(w.minKey)))
+	w.file.Write(w.minKey)
+	// MaxKey [KeySize(4) | MaxKey]
+	binary.Write(w.file, binary.LittleEndian, uint32(len(w.maxKey)))
+	w.file.Write(w.maxKey)
+
+	// フッターの書き込み (インデックスとメタデータの開始位置を記録)
+	footer := make([]byte, 12)
 	binary.LittleEndian.PutUint32(footer[0:4], indexOffset)
-	binary.LittleEndian.PutUint32(footer[4:8], 0xABCD) // Magic Number
+	binary.LittleEndian.PutUint32(footer[4:8], metaOffset) // MetaData Offset
+	binary.LittleEndian.PutUint32(footer[8:12], 0xABCD)    // Magic Number
 	w.file.Write(footer)
 
 	return w.file.Close()

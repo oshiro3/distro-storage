@@ -25,13 +25,12 @@ type indexEntry struct {
 }
 
 // SSTableMeta は SSTable のメタデータを表す
-// SSTable とレベルの関係などを管理する
 type SSTableMeta struct {
-	Level    uint
-	FilePath string
-	FileSize int64
-	MinKey   string
-	MaxKey   string
+	// Level uint
+	// FilePath string
+	// FileSize int64
+	MinKey []byte
+	MaxKey []byte
 }
 
 type Version struct{}

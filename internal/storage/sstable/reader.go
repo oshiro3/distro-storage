@@ -11,6 +11,15 @@ import (
 type Reader struct {
 	file  *os.File
 	index []indexEntry
+	// 現在のエントリの位置を指すオフセット
+	current uint32
+}
+
+// レコードの実体構造体
+type Entry struct {
+	Key   []byte
+	Value []byte
+	Act   ActType
 }
 
 // NewReader は SSTable リーダーを作成します
@@ -26,6 +35,44 @@ func NewReader(path string) (*Reader, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// Next は current を更新して次のエントリに進める
+// 次のエントリが無い場合は false を返す
+func (r *Reader) Next() bool {
+	if _, err := r.file.Seek(int64(r.current), io.SeekStart); err != nil {
+		log.Printf("Error seeking to current offset: %v\n", err)
+		return false
+	}
+	var keyLen uint32
+	if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil {
+		return false
+	}
+
+	var valLen uint32
+	if err := binary.Read(r.file, binary.LittleEndian, &valLen); err != nil {
+		return false
+	}
+
+	// ActType は1バイト固定
+	r.current += keyLen + valLen + 1
+
+	return true
+}
+
+// Head はOFFSETがある場合現在のエントリを返す
+func (r *Reader) Head() *Entry {
+	if r.current == 0 {
+		log.Println("Current offset is 0, no entry to read")
+		return nil
+	}
+	key, value, act, err := readValueAtOffset(r.file, r.current)
+	if err != nil {
+		log.Printf("Error reading value at offset %d: %v\n", r.current, err)
+		return &Entry{}
+	}
+
+	return &Entry{key, value, act}
 }
 
 // loadIndex は SSTable のインデックスを読み込む
@@ -91,31 +138,43 @@ func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 		}
 	}
 
-	// データブロックから値を読み込み
-	if _, err := r.file.Seek(int64(targetOffset), io.SeekStart); err != nil {
+	_, value, act, err := readValueAtOffset(r.file, targetOffset)
+	if err != nil {
 		return nil, 0, false, err
+	}
+
+	return value, act, true, nil
+}
+
+func (r *Reader) Close() error {
+	return r.file.Close()
+}
+
+func readValueAtOffset(f *os.File, targetOffset uint32) (key, value []byte, actType ActType, err error) {
+	// データブロックから値を読み込み
+	if _, err = f.Seek(int64(targetOffset), io.SeekStart); err != nil {
+		return
 	}
 
 	var keyLen uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil {
-		return nil, 0, false, err
+	if err = binary.Read(f, binary.LittleEndian, &keyLen); err != nil {
+		return
 	}
-	readKey := make([]byte, keyLen)
-	r.file.Read(readKey)
+	key = make([]byte, keyLen)
+	f.Read(key)
 
 	var valLen uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &valLen); err != nil {
-		return nil, 0, false, err
+	if err = binary.Read(f, binary.LittleEndian, &valLen); err != nil {
+		return
 	}
-	value := make([]byte, valLen)
-	r.file.Read(value)
+	value = make([]byte, valLen)
+	f.Read(value)
 
 	var valAct uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &valAct); err != nil {
-		return nil, 0, false, err
+	if err = binary.Read(f, binary.LittleEndian, &valAct); err != nil {
+		return
 	}
 	act := make([]byte, valAct)
-	r.file.Read(act)
-
-	return value, ActType(act[0]), true, nil
+	f.Read(act)
+	return key, value, ActType(act[0]), nil
 }

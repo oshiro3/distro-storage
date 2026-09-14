@@ -21,7 +21,7 @@ func TestSSTable_Write(t *testing.T) {
 	}
 
 	for _, d := range data {
-		if err := w.Add([]byte(d.k), []byte(d.v)); err != nil {
+		if err := w.Add([]byte(d.k), []byte(d.v), ActTypePut); err != nil {
 			t.Fatal(err)
 		}
 	}

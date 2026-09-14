@@ -55,7 +55,7 @@ func (m *Memtable) randomLevel() int {
 	return lvl
 }
 
-// Put はキーと値のペアを挿入または更新す�
+// Put はキーと値のペアを挿入または更新する
 // SkipList への挿入はソート済みの状態を維持し O(log n) の時間で行われます
 func (m *Memtable) Put(key, value []byte, act ActType) {
 	m.mu.Lock()
