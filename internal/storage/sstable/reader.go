@@ -12,8 +12,12 @@ type Reader struct {
 	file  *os.File
 	index []indexEntry
 	meta  SSTableMeta
-	// 現在のエントリの位置を指すオフセット
+	// データブロックの終端(インデックスブロックの開始位置)を指すオフセット
+	dataEnd uint32
+	// 次に読み込むエントリの位置を指すオフセット
 	current uint32
+	// 直前の Next() で読み込んだエントリ
+	head *Entry
 }
 
 // レコードの実体構造体
@@ -42,42 +46,31 @@ func NewReader(path string) (*Reader, error) {
 	return r, nil
 }
 
-// Next は current を更新して次のエントリに進める
+// Next は current の位置からエントリを読み込んで Head() で参照できるようにし、
+// current を次のエントリの位置に進める
 // 次のエントリが無い場合は false を返す
 func (r *Reader) Next() bool {
-	if _, err := r.file.Seek(int64(r.current), io.SeekStart); err != nil {
-		log.Printf("Error seeking to current offset: %v\n", err)
-		return false
-	}
-	var keyLen uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil {
+	if r.current >= r.dataEnd {
+		r.head = nil
 		return false
 	}
 
-	var valLen uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &valLen); err != nil {
+	key, value, act, err := readValueAtOffset(r.file, r.current)
+	if err != nil {
+		r.head = nil
 		return false
 	}
 
-	// ActType は1バイト固定
-	r.current += keyLen + valLen + 1
+	// [KeySize(4)|Key|ValSize(4)|Val|Act(1)]
+	r.current += 4 + uint32(len(key)) + 4 + uint32(len(value)) + 1
+	r.head = &Entry{Key: key, Value: value, Act: act}
 
 	return true
 }
 
-// Head はOFFSETがある場合現在のエントリを返す
+// Head は直前の Next() で読み込んだ現在のエントリを返す
 func (r *Reader) Head() *Entry {
-	if r.current == 0 {
-		log.Println("Current offset is 0, no entry to read")
-		return nil
-	}
-	key, value, act, err := readValueAtOffset(r.file, r.current)
-	if err != nil {
-		log.Printf("Error reading value at offset %d: %v\n", r.current, err)
-		return &Entry{}
-	}
-
-	return &Entry{key, value, act}
+	return r.head
 }
 
 // loadIndex は SSTable のインデックスを読み込む
@@ -85,16 +78,18 @@ func (r *Reader) loadIndex() error {
 	stat, _ := r.file.Stat()
 	size := stat.Size()
 
-	// フッターの読み込み
-	footer := make([]byte, 8)
-	if _, err := r.file.ReadAt(footer, size-8); err != nil {
+	// フッターの読み込み (indexOffset(4) | metaOffset(4) | magic(4))
+	footer := make([]byte, 12)
+	if _, err := r.file.ReadAt(footer, size-12); err != nil {
 		return err
 	}
 	indexOffset := binary.LittleEndian.Uint32(footer[0:4])
-	magic := binary.LittleEndian.Uint32(footer[4:8])
+	metaOffset := binary.LittleEndian.Uint32(footer[4:8])
+	magic := binary.LittleEndian.Uint32(footer[8:12])
 	if magic != 0xABCD {
 		return os.ErrInvalid
 	}
+	r.dataEnd = indexOffset
 
 	// インデックスブロックの読み込み
 	_, err := r.file.Seek(int64(indexOffset), io.SeekStart)
@@ -103,16 +98,13 @@ func (r *Reader) loadIndex() error {
 	}
 
 	for {
-		var keyLen uint32
-		if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil || err == io.EOF {
-			curr, _ := r.file.Seek(0, io.SeekCurrent)
-			if curr >= size-8 {
-				break
-			}
-			if err != io.EOF {
-				return err
-			}
+		curr, _ := r.file.Seek(0, io.SeekCurrent)
+		if curr >= int64(metaOffset) {
 			break
+		}
+		var keyLen uint32
+		if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil {
+			return err
 		}
 		key := make([]byte, keyLen)
 		r.file.Read(key)

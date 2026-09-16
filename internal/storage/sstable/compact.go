@@ -23,6 +23,12 @@ func Compact(ctx context.Context, path string, count *uint, level uint) error {
 		// 1. L0ファイルのリストを取得
 		l0Path := filepath.Join(path, "l0")
 		if err := filepath.Walk(l0Path, func(p string, info fs.FileInfo, err error) error {
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
 			if info.IsDir() {
 				return nil
 			}
@@ -44,6 +50,12 @@ func Compact(ctx context.Context, path string, count *uint, level uint) error {
 		// 1. level1以上のコンパクトは指定されたレベルのファイルを対象にする
 		drainedPath := filepath.Join(path, fmt.Sprintf("l%d", level))
 		if err := filepath.Walk(drainedPath, func(p string, info fs.FileInfo, err error) error {
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
 			if info.IsDir() {
 				return nil
 			}
@@ -66,6 +78,12 @@ func Compact(ctx context.Context, path string, count *uint, level uint) error {
 	// 次のレベルのインデックスを見てCompact対象になるファイルを特定
 	distPath := filepath.Join(path, fmt.Sprintf("l%d", level+1))
 	if err := filepath.Walk(distPath, func(p string, info fs.FileInfo, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
 		if info.IsDir() {
 			return nil
 		}
@@ -96,9 +114,10 @@ func compact(ctx context.Context, iters []Iterator, path string, count *uint) er
 			pq = append(pq, &Item{Iter: iter, Priority: i})
 		}
 	}
+	heap.Init(&pq)
 
 	// NOTE: count のロックが取れない問題がある
-	writer, err := NewWriter(path, fmt.Sprintf("%05d.sst", count))
+	writer, err := NewWriter(path, fmt.Sprintf("%05d.sst", *count))
 	if err != nil {
 		log.Printf("Error creating new SSTable during split: %v\n", err)
 		return err
@@ -129,7 +148,7 @@ func compact(ctx context.Context, iters []Iterator, path string, count *uint) er
 				writer.Finish()
 				// 次のファイル名のためにアトミックに sstCount を増やす
 				*count++
-				writer, err = NewWriter(path, fmt.Sprintf("%05d.sst", count))
+				writer, err = NewWriter(path, fmt.Sprintf("%05d.sst", *count))
 				if err != nil {
 					log.Printf("Error creating new SSTable during split: %v\n", err)
 					return err
