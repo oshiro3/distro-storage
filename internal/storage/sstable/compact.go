@@ -17,36 +17,66 @@ func Compact(ctx context.Context, path string, count *uint, level uint) error {
 	// level0のコンパクトは全てのL0ファイルを対象にする
 	// NOTE: 効率としては古い順に一定数ずつコンパクトする方が良いが今回は全てのファイルを対象にする
 	var iters []Iterator
-	var targets []string
+	var minKey, maxKey []byte
 	if level == 0 {
 		// 全てのL0ファイルを読み込むイテレータを作成
 		// 1. L0ファイルのリストを取得
 		l0Path := filepath.Join(path, "l0")
-		if err := filepath.Walk(l0Path, func(path string, info fs.FileInfo, err error) error {
+		if err := filepath.Walk(l0Path, func(p string, info fs.FileInfo, err error) error {
 			if info.IsDir() {
 				return nil
 			}
-			reader, _ := NewReader(path)
-			targets = append(targets, path)
+			reader, _ := NewReader(p)
+
+			// 2. minKey と maxKey を取得
+			if bytes.Compare(minKey, reader.meta.MinKey) < 0 {
+				minKey = reader.meta.MinKey
+			}
+			if bytes.Compare(maxKey, reader.meta.MaxKey) > 0 {
+				maxKey = reader.meta.MaxKey
+			}
+			iters = append(iters, reader)
 			return nil
 		}); err != nil {
 			return err
 		}
+	} else {
+		// 1. level1以上のコンパクトは指定されたレベルのファイルを対象にする
+		drainedPath := filepath.Join(path, fmt.Sprintf("l%d", level))
+		if err := filepath.Walk(drainedPath, func(p string, info fs.FileInfo, err error) error {
+			if info.IsDir() {
+				return nil
+			}
+			reader, _ := NewReader(p)
 
-		// 2. minKey と maxKey を取得
-
-		// 3. L1のインデックスを見てCompact対象になるファイルを特定
-		// 4. L0のイテレータとL1のイテレータを作成
-		iters := make([]Iterator, len(targets))
-		for _, path := range targets {
-			reader, err := NewReader(path)
-			if err != nil {
-				log.Printf("Error creating reader for %s: %v\n", path, err)
-				return err
+			// 2. minKey と maxKey を取得
+			if bytes.Compare(minKey, reader.meta.MinKey) < 0 {
+				minKey = reader.meta.MinKey
+			}
+			if bytes.Compare(maxKey, reader.meta.MaxKey) > 0 {
+				maxKey = reader.meta.MaxKey
 			}
 			iters = append(iters, reader)
+			return nil
+		}); err != nil {
+			return err
 		}
-	} else {
+	}
+
+	// 次のレベルのインデックスを見てCompact対象になるファイルを特定
+	distPath := filepath.Join(path, fmt.Sprintf("l%d", level+1))
+	if err := filepath.Walk(distPath, func(p string, info fs.FileInfo, err error) error {
+		if info.IsDir() {
+			return nil
+		}
+		reader, _ := NewReader(p)
+		// 3. Drain の minKey と maxKey の範囲に重なる Dist ファイルを対象にする
+		if bytes.Compare(reader.meta.MinKey, maxKey) <= 0 && bytes.Compare(reader.meta.MaxKey, minKey) >= 0 {
+			iters = append(iters, reader)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if err := compact(ctx, iters, path, count); err != nil {
