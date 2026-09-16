@@ -6,21 +6,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
+	"path/filepath"
 )
 
 // Compact は指定されたレベルの SSTable をコンパクト化する
+// path はデータディレクトリ
 func Compact(ctx context.Context, path string, count *uint, level uint) error {
 	// level0のコンパクトは全てのL0ファイルを対象にする
 	// NOTE: 効率としては古い順に一定数ずつコンパクトする方が良いが今回は全てのファイルを対象にする
 	var iters []Iterator
+	var targets []string
 	if level == 0 {
 		// 全てのL0ファイルを読み込むイテレータを作成
 		// 1. L0ファイルのリストを取得
+		l0Path := filepath.Join(path, "l0")
+		if err := filepath.Walk(l0Path, func(path string, info fs.FileInfo, err error) error {
+			if info.IsDir() {
+				return nil
+			}
+			reader, _ := NewReader(path)
+			targets = append(targets, path)
+			return nil
+		}); err != nil {
+			return err
+		}
+
 		// 2. minKey と maxKey を取得
+
 		// 3. L1のインデックスを見てCompact対象になるファイルを特定
 		// 4. L0のイテレータとL1のイテレータを作成
-		var targets []string
 		iters := make([]Iterator, len(targets))
 		for _, path := range targets {
 			reader, err := NewReader(path)

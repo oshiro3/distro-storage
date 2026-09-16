@@ -28,7 +28,7 @@ type indexEntry struct {
 type SSTableMeta struct {
 	// Level uint
 	// FilePath string
-	// FileSize int64
+	Size   uint32
 	MinKey []byte
 	MaxKey []byte
 }

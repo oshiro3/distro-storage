@@ -52,15 +52,14 @@ func (w *Writer) Add(key, value []byte, act ActType) error {
 		w.currSize = 0
 	}
 
-	// データ書き込み [KeySize(4)|Key|ValSize(4)|Val|ActSize(1)|Act]
+	// データ書き込み [KeySize(4)|Key|ValSize(4)|Val|Act(1)]
 	kvSize := 8 + len(key) + len(value) + 1
 	buf := make([]byte, kvSize)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(key)))
 	copy(buf[4:], key)
 	binary.LittleEndian.PutUint32(buf[4+len(key):8+len(key)], uint32(len(value)))
 	copy(buf[8+len(key):], value)
-	binary.LittleEndian.PutUint32(buf[8+len(key)+len(value):], 1)
-	copy(buf[8+len(key)+len(value)+4:], []byte{byte(act)})
+	buf[8+len(key)+len(value)] = byte(act)
 
 	n, err := w.file.Write(buf)
 	if err != nil {
@@ -93,6 +92,8 @@ func (w *Writer) Finish() error {
 
 	// メタデータ (SSTableMeta) ブロックの書き込み
 	metaOffset := indexOffset + indexBytesWritten
+	// Size [Size(8)]
+	binary.Write(w.file, binary.LittleEndian, uint32(w.currSize))
 	// MinKey [KeySize(4) | MinKey]
 	binary.Write(w.file, binary.LittleEndian, uint32(len(w.minKey)))
 	w.file.Write(w.minKey)
