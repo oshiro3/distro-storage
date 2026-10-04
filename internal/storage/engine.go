@@ -151,7 +151,10 @@ func (e *Engine) flushImmutableMemtable() {
 	e.mu.Unlock()
 }
 
-func (e *Engine) Get(key []byte) ([]byte, bool) {
+// Get は key の最新の値を返す。
+// 見つからない、または削除済みの場合は found=false, err=nil を返す。
+// SSTable の読み込みに失敗した場合は err != nil を返す (このとき found は無視してよい)。
+func (e *Engine) Get(key []byte) (value []byte, found bool, err error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -161,18 +164,18 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	// まずActive Memtable をチェック
 	if val, act, ok := e.activeMem.Get(key); ok {
 		if act == memtable.ActTypeDelete {
-			return nil, false
+			return nil, false, nil
 		}
-		return val, true
+		return val, true, nil
 	}
 
 	// 次いで Immutable Memtable をチェック
 	if e.immutableMem != nil {
 		if val, act, ok := e.immutableMem.Get(key); ok {
 			if act == memtable.ActTypeDelete {
-				return nil, false
+				return nil, false, nil
 			}
-			return val, true
+			return val, true, nil
 		}
 	}
 
@@ -184,17 +187,16 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 			continue
 		}
 		if err != nil {
-			log.Printf("Error reading from SSTable %s: %v\n", sstFileName(i), err)
-			return nil, false
+			return nil, false, fmt.Errorf("read SSTable %s: %w", sstFileName(i), err)
 		}
 		if ok {
 			if act == sstable.ActTypeDelete {
-				return nil, false
+				return nil, false, nil
 			}
-			return val, true
+			return val, true, nil
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 // l0Dir は L0 の SSTable を置くディレクトリを返す (Flush の書き出し先と Get の読み込み先で共通)

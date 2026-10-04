@@ -34,7 +34,10 @@ func TestEngine_AutoFlush(t *testing.T) {
 	}
 
 	// Flush中/後でもデータが引けるか確認
-	val, ok := e.Get([]byte("key-00000"))
+	val, ok, err := e.Get([]byte("key-00000"))
+	if err != nil {
+		t.Fatalf("Get(key-00000) error: %v", err)
+	}
 	// for _, key := range e.immutableMem.Keys() {
 	// 	// for _, key := range e.activeMem.Keys() {
 	// 	t.Logf("Active Memtable Key: %s", key)

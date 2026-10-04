@@ -54,7 +54,11 @@ func (e *testEngine) del(t *testing.T, key string) {
 func (e *testEngine) assertFound(t *testing.T, key, want string) {
 	t.Helper()
 
-	got, ok := e.Get([]byte(key))
+	got, ok, err := e.Get([]byte(key))
+	if err != nil {
+		t.Errorf("Get(%q) error: %v", key, err)
+		return
+	}
 	if !ok {
 		t.Errorf("Get(%q): found = false, want true (value %q)", key, want)
 		return
@@ -67,7 +71,12 @@ func (e *testEngine) assertFound(t *testing.T, key, want string) {
 func (e *testEngine) assertNotFound(t *testing.T, key string) {
 	t.Helper()
 
-	if got, ok := e.Get([]byte(key)); ok {
+	got, ok, err := e.Get([]byte(key))
+	if err != nil {
+		t.Errorf("Get(%q) error: %v", key, err)
+		return
+	}
+	if ok {
 		t.Errorf("Get(%q) = %q, found = true, want not found (deleted key must not resurface)", key, got)
 	}
 }
