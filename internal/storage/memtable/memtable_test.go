@@ -65,7 +65,7 @@ func TestMemtable_SortedOrder(t *testing.T) {
 	var keys []string
 	curr := m.head.next[0]
 	for curr != nil {
-		keys = append(keys, string(curr.key))
+		keys = append(keys, string(curr.Key))
 		curr = curr.next[0]
 	}
 
