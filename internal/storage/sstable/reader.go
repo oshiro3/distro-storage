@@ -132,14 +132,44 @@ func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 	if i < 0 {
 		return nil, 0, false, nil
 	}
-	targetOffset := r.index[i].offset
 
-	_, value, act, err := readValueAtOffset(r.file, targetOffset)
-	if err != nil {
-		return nil, 0, false, err
+	offset, blockEnd := r.blockRange(i)
+	if offset >= blockEnd || blockEnd > r.dataEnd {
+		return nil, 0, false, os.ErrInvalid
 	}
 
-	return value, act, true, nil
+	// ブロック内を順にデコードしてキーを比較する
+	for offset < blockEnd {
+		k, value, act, err := readValueAtOffset(r.file, offset)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		// [KeySize(4)|Key|ValSize(4)|Val|Act(1)]
+		offset += 4 + uint32(len(k)) + 4 + uint32(len(value)) + 1
+		if offset > blockEnd {
+			return nil, 0, false, os.ErrInvalid
+		}
+
+		switch cmp := bytes.Compare(k, key); {
+		case cmp == 0:
+			return value, act, true, nil
+		case cmp > 0:
+			// ソート済みなので、これ以降に key は存在しない
+			return nil, 0, false, nil
+		}
+	}
+
+	return nil, 0, false, nil
+}
+
+// blockRange は i 番目のデータブロックの範囲 [start, end) を返す
+// end は次のブロックの先頭、最後のブロックなら dataEnd
+func (r *Reader) blockRange(i int) (start, end uint32) {
+	start = r.index[i].offset
+	if i+1 < len(r.index) {
+		return start, r.index[i+1].offset
+	}
+	return start, r.dataEnd
 }
 
 func (r *Reader) Close() error {
