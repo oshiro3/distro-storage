@@ -6,6 +6,7 @@ import (
 	"distro-storage/internal/storage/wal"
 	"errors"
 	"log"
+	"os"
 	"path/filepath"
 
 	"fmt"
@@ -101,10 +102,10 @@ func (e *Engine) flushImmutableMemtable() {
 	e.mu.Lock()
 	mem := e.immutableMem
 	e.sstCount++
-	path := filepath.Join(e.dir, "l0")
+	path := e.l0Dir()
 	e.mu.Unlock()
 
-	writer, err := sstable.NewWriter(path, fmt.Sprintf("%05d.sst", e.sstCount))
+	writer, err := sstable.NewWriter(path, sstFileName(e.sstCount))
 	if err != nil {
 		log.Printf("Error creating SSTable: %v\n", err)
 		return
@@ -128,7 +129,7 @@ func (e *Engine) flushImmutableMemtable() {
 				e.mu.Unlock()
 
 				// 4. 新しい Writer 作成する
-				writer, err = sstable.NewWriter(path, fmt.Sprintf("%05d.sst", e.sstCount))
+				writer, err = sstable.NewWriter(path, sstFileName(e.sstCount))
 				if err != nil {
 					log.Printf("Error creating new SSTable during split: %v\n", err)
 					return
@@ -154,33 +155,65 @@ func (e *Engine) Get(key []byte) ([]byte, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// 新しい層から順に探し、キーが見つかった時点でその層の結果を採用する。
+	// 削除マーカーが見つかった場合は、より古い層の値を見ずに not found を返す。
+
 	// まずActive Memtable をチェック
-	if val, act, ok := e.activeMem.Get(key); ok && act != memtable.ActTypeDelete {
+	if val, act, ok := e.activeMem.Get(key); ok {
+		if act == memtable.ActTypeDelete {
+			return nil, false
+		}
 		return val, true
 	}
 
 	// 次いで Immutable Memtable をチェック
 	if e.immutableMem != nil {
-		if val, act, ok := e.immutableMem.Get(key); ok && act != memtable.ActTypeDelete {
+		if val, act, ok := e.immutableMem.Get(key); ok {
+			if act == memtable.ActTypeDelete {
+				return nil, false
+			}
 			return val, true
 		}
 	}
 
 	// 最後に SSTables をチェック
 	for i := e.sstCount; i >= 1; i-- {
-		path := filepath.Join(e.dir, fmt.Sprintf("%05d.sst", i))
-		reader, _ := sstable.NewReader(path)
-		if val, act, ok, err := reader.Get(key); ok {
-			if err != nil {
-				log.Printf("Error reading from SSTable: %v\n", err)
+		val, act, ok, err := e.getFromSST(i, key)
+		if errors.Is(err, os.ErrNotExist) {
+			// sstCount の加算後、ファイルが作られるまでの間に Get が走った場合
+			continue
+		}
+		if err != nil {
+			log.Printf("Error reading from SSTable %s: %v\n", sstFileName(i), err)
+			return nil, false
+		}
+		if ok {
+			if act == sstable.ActTypeDelete {
 				return nil, false
 			}
-			if act != sstable.ActTypeDelete {
-				return val, true
-			}
+			return val, true
 		}
 	}
 	return nil, false
+}
+
+// l0Dir は L0 の SSTable を置くディレクトリを返す (Flush の書き出し先と Get の読み込み先で共通)
+func (e *Engine) l0Dir() string {
+	return filepath.Join(e.dir, "l0")
+}
+
+func sstFileName(n int) string {
+	return fmt.Sprintf("%05d.sst", n)
+}
+
+// getFromSST は n 番目の SSTable からキーを探す。開いた Reader は必ず閉じる
+func (e *Engine) getFromSST(n int, key []byte) ([]byte, sstable.ActType, bool, error) {
+	reader, err := sstable.NewReader(filepath.Join(e.l0Dir(), sstFileName(n)))
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer reader.Close()
+	return reader.Get(key)
 }
 
 func (e *Engine) Close() error {
