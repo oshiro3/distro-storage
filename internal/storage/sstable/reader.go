@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"log"
 	"os"
+	"sort"
 )
 
 type Reader struct {
@@ -34,16 +34,64 @@ func NewReader(path string) (*Reader, error) {
 		return nil, err
 	}
 
-	r := &Reader{file: f}
-	if err := r.loadIndex(); err != nil {
+	indexOffset, metaOffset, err := readFooter(f)
+	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	if err := r.loadMeta(); err != nil {
+
+	r := &Reader{file: f, dataEnd: indexOffset}
+	if err := r.loadIndex(indexOffset, metaOffset); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := r.loadMeta(metaOffset); err != nil {
 		f.Close()
 		return nil, err
 	}
 	return r, nil
+}
+
+const footerSize = 12
+
+// readFooter はフッター (indexOffset(4) | metaOffset(4) | magic(4)) を読み込んで検証する
+func readFooter(f *os.File) (indexOffset, metaOffset uint32, err error) {
+	stat, err := f.Stat()
+	if err != nil {
+		return 0, 0, err
+	}
+	size := stat.Size()
+	if size < footerSize {
+		return 0, 0, os.ErrInvalid
+	}
+
+	footer := make([]byte, footerSize)
+	if err := readAtFull(f, footer, size-footerSize); err != nil {
+		return 0, 0, err
+	}
+	indexOffset = binary.LittleEndian.Uint32(footer[0:4])
+	metaOffset = binary.LittleEndian.Uint32(footer[4:8])
+	if binary.LittleEndian.Uint32(footer[8:12]) != 0xABCD {
+		return 0, 0, os.ErrInvalid
+	}
+
+	// データ → インデックス → メタデータ → フッターの順に並んでいなければ破損
+	if indexOffset > metaOffset || int64(metaOffset) > size-footerSize {
+		return 0, 0, os.ErrInvalid
+	}
+	return indexOffset, metaOffset, nil
+}
+
+// readAtFull は off から len(buf) バイトを読み込む。足りなければ io.ErrUnexpectedEOF を返す
+func readAtFull(f io.ReaderAt, buf []byte, off int64) error {
+	n, err := f.ReadAt(buf, off)
+	if n == len(buf) {
+		return nil
+	}
+	if err == nil || err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // Next は current の位置からエントリを読み込んで Head() で参照できるようにし、
@@ -55,7 +103,7 @@ func (r *Reader) Next() bool {
 		return false
 	}
 
-	key, value, act, err := readValueAtOffset(r.file, r.current)
+	key, value, act, err := readValueAtOffset(r.file, r.current, r.dataEnd)
 	if err != nil {
 		r.head = nil
 		return false
@@ -74,149 +122,193 @@ func (r *Reader) Head() *Entry {
 }
 
 // loadIndex は SSTable のインデックスを読み込む
-func (r *Reader) loadIndex() error {
-	stat, _ := r.file.Stat()
-	size := stat.Size()
+// インデックスは [indexOffset, metaOffset) の範囲に [KeySize(4)|Key|Offset(4)] が並ぶ
+func (r *Reader) loadIndex(indexOffset, metaOffset uint32) error {
+	pos, end := uint64(indexOffset), uint64(metaOffset)
+	var u32 [4]byte
 
-	// フッターの読み込み (indexOffset(4) | metaOffset(4) | magic(4))
-	footer := make([]byte, 12)
-	if _, err := r.file.ReadAt(footer, size-12); err != nil {
-		return err
-	}
-	indexOffset := binary.LittleEndian.Uint32(footer[0:4])
-	metaOffset := binary.LittleEndian.Uint32(footer[4:8])
-	magic := binary.LittleEndian.Uint32(footer[8:12])
-	if magic != 0xABCD {
-		return os.ErrInvalid
-	}
-	r.dataEnd = indexOffset
-
-	// インデックスブロックの読み込み
-	_, err := r.file.Seek(int64(indexOffset), io.SeekStart)
-	if err != nil {
-		return err
-	}
-
-	for {
-		curr, _ := r.file.Seek(0, io.SeekCurrent)
-		if curr >= int64(metaOffset) {
-			break
+	for pos < end {
+		if pos+4 > end {
+			return os.ErrInvalid
 		}
-		var keyLen uint32
-		if err := binary.Read(r.file, binary.LittleEndian, &keyLen); err != nil {
+		if err := readAtFull(r.file, u32[:], int64(pos)); err != nil {
 			return err
 		}
+		keyLen := uint64(binary.LittleEndian.Uint32(u32[:]))
+		pos += 4
+
+		if keyLen+4 > end-pos {
+			return os.ErrInvalid
+		}
 		key := make([]byte, keyLen)
-		r.file.Read(key)
-		var offset uint32
-		binary.Read(r.file, binary.LittleEndian, &offset)
-		r.index = append(r.index, indexEntry{key: key, offset: offset})
+		if err := readAtFull(r.file, key, int64(pos)); err != nil {
+			return err
+		}
+		pos += keyLen
+
+		if err := readAtFull(r.file, u32[:], int64(pos)); err != nil {
+			return err
+		}
+		pos += 4
+
+		r.index = append(r.index, indexEntry{key: key, offset: binary.LittleEndian.Uint32(u32[:])})
 	}
 	return nil
 }
 
-// Get は指定されたキーに対応する値を返します
+// Get は key に完全一致するエントリの値と ActType を返します
+//
+//   - key が存在しない場合は found=false, err=nil を返す
+//   - 削除マーカー(ActTypeDelete)も found=true で返す。呼び出し側が ActType で判定する
+//   - I/O エラーやファイルの破損では err != nil を返す。このとき found は無視してよい
 func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
-	log.Printf("SSTable Get: key=%s", string(key))
-	// バイナリサーチでインデックスを探索
-	low, high := 0, len(r.index)-1
-	var targetOffset uint32
-	for low <= high {
-		mid := (low + high) / 2
-		cmp := bytes.Compare(r.index[mid].key, key)
-		if cmp == 0 {
-			targetOffset = r.index[mid].offset
-			log.Printf("Found key at offset: %d\n", targetOffset)
-			break
-		} else if cmp < 0 {
-			low = mid + 1
-		} else {
-			high = mid - 1
+	// データが無い、または MinKey/MaxKey の範囲外なら I/O なしで not found
+	if r.dataEnd == 0 || bytes.Compare(key, r.meta.MinKey) < 0 || bytes.Compare(key, r.meta.MaxKey) > 0 {
+		return nil, 0, false, nil
+	}
+
+	// 下限探索: index[i].key <= key を満たす最大の i(key を含み得るブロック)を求める
+	i := sort.Search(len(r.index), func(i int) bool {
+		return bytes.Compare(r.index[i].key, key) > 0
+	}) - 1
+	if i < 0 {
+		return nil, 0, false, nil
+	}
+
+	offset, blockEnd := r.blockRange(i)
+	if offset >= blockEnd || blockEnd > r.dataEnd {
+		return nil, 0, false, os.ErrInvalid
+	}
+
+	// ブロック内を順にデコードしてキーを比較する
+	for offset < blockEnd {
+		k, value, act, err := readValueAtOffset(r.file, offset, blockEnd)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		// [KeySize(4)|Key|ValSize(4)|Val|Act(1)]
+		offset += 4 + uint32(len(k)) + 4 + uint32(len(value)) + 1
+
+		switch cmp := bytes.Compare(k, key); {
+		case cmp == 0:
+			return value, act, true, nil
+		case cmp > 0:
+			// ソート済みなので、これ以降に key は存在しない
+			return nil, 0, false, nil
 		}
 	}
 
-	_, value, act, err := readValueAtOffset(r.file, targetOffset)
-	if err != nil {
-		return nil, 0, false, err
-	}
+	return nil, 0, false, nil
+}
 
-	return value, act, true, nil
+// blockRange は i 番目のデータブロックの範囲 [start, end) を返す
+// end は次のブロックの先頭、最後のブロックなら dataEnd
+func (r *Reader) blockRange(i int) (start, end uint32) {
+	start = r.index[i].offset
+	if i+1 < len(r.index) {
+		return start, r.index[i+1].offset
+	}
+	return start, r.dataEnd
 }
 
 func (r *Reader) Close() error {
 	return r.file.Close()
 }
 
-func readValueAtOffset(f *os.File, targetOffset uint32) (key, value []byte, actType ActType, err error) {
-	// データブロックから値を読み込み
-	if _, err = f.Seek(int64(targetOffset), io.SeekStart); err != nil {
-		return
-	}
+// readValueAtOffset は offset から 1 エントリ [KeySize(4)|Key|ValSize(4)|Val|Act(1)] を読み込む
+// エントリが limit を超える場合は、長さフィールドの破損とみなして os.ErrInvalid を返す
+func readValueAtOffset(f io.ReaderAt, offset, limit uint32) (key, value []byte, actType ActType, err error) {
+	pos, end := uint64(offset), uint64(limit)
+	var u32 [4]byte
 
-	var keyLen uint32
-	if err = binary.Read(f, binary.LittleEndian, &keyLen); err != nil {
-		return
+	if pos+4 > end {
+		return nil, nil, 0, os.ErrInvalid
+	}
+	if err = readAtFull(f, u32[:], int64(pos)); err != nil {
+		return nil, nil, 0, err
+	}
+	keyLen := uint64(binary.LittleEndian.Uint32(u32[:]))
+	pos += 4
+
+	// ValSize(4) も含めて確保前に検査する
+	if keyLen+4 > end-pos {
+		return nil, nil, 0, os.ErrInvalid
 	}
 	key = make([]byte, keyLen)
-	f.Read(key)
+	if err = readAtFull(f, key, int64(pos)); err != nil {
+		return nil, nil, 0, err
+	}
+	pos += keyLen
 
-	var valLen uint32
-	if err = binary.Read(f, binary.LittleEndian, &valLen); err != nil {
-		return
+	if err = readAtFull(f, u32[:], int64(pos)); err != nil {
+		return nil, nil, 0, err
+	}
+	valLen := uint64(binary.LittleEndian.Uint32(u32[:]))
+	pos += 4
+
+	// Act(1) も含めて確保前に検査する
+	if valLen+1 > end-pos {
+		return nil, nil, 0, os.ErrInvalid
 	}
 	value = make([]byte, valLen)
-	f.Read(value)
+	if err = readAtFull(f, value, int64(pos)); err != nil {
+		return nil, nil, 0, err
+	}
+	pos += valLen
 
 	var act [1]byte
-	if _, err = io.ReadFull(f, act[:]); err != nil {
-		return
+	if err = readAtFull(f, act[:], int64(pos)); err != nil {
+		return nil, nil, 0, err
 	}
 	return key, value, ActType(act[0]), nil
 }
 
 // loadMeta は SSTable のメタデータ (Size/MinKey/MaxKey) を読み込む
-func (r *Reader) loadMeta() error {
+// メタデータは [metaOffset, フッター) の範囲に [Size(4)|MinKeySize(4)|MinKey|MaxKeySize(4)|MaxKey] が並ぶ
+func (r *Reader) loadMeta(metaOffset uint32) error {
 	stat, err := r.file.Stat()
 	if err != nil {
 		return err
 	}
-	size := stat.Size()
+	pos, end := uint64(metaOffset), uint64(stat.Size()-footerSize)
+	var u32 [4]byte
 
-	// フッターの読み込み (indexOffset(4) | metaOffset(4) | magic(4))
-	footer := make([]byte, 12)
-	if _, err := r.file.ReadAt(footer, size-12); err != nil {
-		return err
+	readU32 := func() (uint64, error) {
+		if pos+4 > end {
+			return 0, os.ErrInvalid
+		}
+		if err := readAtFull(r.file, u32[:], int64(pos)); err != nil {
+			return 0, err
+		}
+		pos += 4
+		return uint64(binary.LittleEndian.Uint32(u32[:])), nil
 	}
-	metaOffset := binary.LittleEndian.Uint32(footer[4:8])
-	magic := binary.LittleEndian.Uint32(footer[8:12])
-	if magic != 0xABCD {
-		return os.ErrInvalid
-	}
-
-	if _, err := r.file.Seek(int64(metaOffset), io.SeekStart); err != nil {
-		return err
+	readKey := func() ([]byte, error) {
+		n, err := readU32()
+		if err != nil {
+			return nil, err
+		}
+		if n > end-pos {
+			return nil, os.ErrInvalid
+		}
+		key := make([]byte, n)
+		if err := readAtFull(r.file, key, int64(pos)); err != nil {
+			return nil, err
+		}
+		pos += n
+		return key, nil
 	}
 
 	var meta SSTableMeta
-	if err := binary.Read(r.file, binary.LittleEndian, &meta.Size); err != nil {
+	size, err := readU32()
+	if err != nil {
 		return err
 	}
-
-	var minKeyLen uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &minKeyLen); err != nil {
+	meta.Size = uint32(size)
+	if meta.MinKey, err = readKey(); err != nil {
 		return err
 	}
-	meta.MinKey = make([]byte, minKeyLen)
-	if _, err := io.ReadFull(r.file, meta.MinKey); err != nil {
-		return err
-	}
-
-	var maxKeyLen uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &maxKeyLen); err != nil {
-		return err
-	}
-	meta.MaxKey = make([]byte, maxKeyLen)
-	if _, err := io.ReadFull(r.file, meta.MaxKey); err != nil {
+	if meta.MaxKey, err = readKey(); err != nil {
 		return err
 	}
 

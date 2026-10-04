@@ -92,8 +92,10 @@ func (w *Writer) Finish() error {
 
 	// メタデータ (SSTableMeta) ブロックの書き込み
 	metaOffset := indexOffset + indexBytesWritten
-	// Size [Size(8)]
-	binary.Write(w.file, binary.LittleEndian, uint32(w.currSize))
+	// Size [Size(4)] ファイル全体のサイズ (データ + インデックス + メタデータ + フッター)
+	metaBytes := 4 + 4 + uint32(len(w.minKey)) + 4 + uint32(len(w.maxKey))
+	totalSize := metaOffset + metaBytes + footerSize
+	binary.Write(w.file, binary.LittleEndian, totalSize)
 	// MinKey [KeySize(4) | MinKey]
 	binary.Write(w.file, binary.LittleEndian, uint32(len(w.minKey)))
 	w.file.Write(w.minKey)
