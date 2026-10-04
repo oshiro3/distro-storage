@@ -118,6 +118,12 @@ func (r *Reader) loadIndex() error {
 // Get は指定されたキーに対応する値を返します
 func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 	log.Printf("SSTable Get: key=%s", string(key))
+
+	// データが無い、または MinKey/MaxKey の範囲外なら I/O なしで not found
+	if r.dataEnd == 0 || bytes.Compare(key, r.meta.MinKey) < 0 || bytes.Compare(key, r.meta.MaxKey) > 0 {
+		return nil, 0, false, nil
+	}
+
 	// バイナリサーチでインデックスを探索
 	low, high := 0, len(r.index)-1
 	var targetOffset uint32
