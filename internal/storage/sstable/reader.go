@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"log"
 	"os"
 	"sort"
 )
@@ -157,10 +156,12 @@ func (r *Reader) loadIndex(indexOffset, metaOffset uint32) error {
 	return nil
 }
 
-// Get は指定されたキーに対応する値を返します
+// Get は key に完全一致するエントリの値と ActType を返します
+//
+//   - key が存在しない場合は found=false, err=nil を返す
+//   - 削除マーカー(ActTypeDelete)も found=true で返す。呼び出し側が ActType で判定する
+//   - I/O エラーやファイルの破損では err != nil を返す。このとき found は無視してよい
 func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
-	log.Printf("SSTable Get: key=%s", string(key))
-
 	// データが無い、または MinKey/MaxKey の範囲外なら I/O なしで not found
 	if r.dataEnd == 0 || bytes.Compare(key, r.meta.MinKey) < 0 || bytes.Compare(key, r.meta.MaxKey) > 0 {
 		return nil, 0, false, nil
