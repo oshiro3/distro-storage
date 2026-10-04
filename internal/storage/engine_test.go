@@ -20,12 +20,18 @@ func TestEngine_RestartRecovery(t *testing.T) {
 	}
 
 	// 3. データが復元されているか確認
-	val, find := e2.Get([]byte("hero"))
+	val, find, err := e2.Get([]byte("hero"))
+	if err != nil {
+		t.Fatalf("Get(hero) error: %v", err)
+	}
 	if !find || string(val) != "Skywalker" {
 		t.Errorf("Expected Skywalker, got %s", val)
 	}
 
-	val2, _ := e2.Get([]byte("villain"))
+	val2, _, err := e2.Get([]byte("villain"))
+	if err != nil {
+		t.Fatalf("Get(villain) error: %v", err)
+	}
 	if string(val2) != "Vader" {
 		t.Errorf("Expected Vader, got %s", val2)
 	}
