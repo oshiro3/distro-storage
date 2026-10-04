@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 )
 
 type Reader struct {
@@ -124,22 +125,14 @@ func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 		return nil, 0, false, nil
 	}
 
-	// バイナリサーチでインデックスを探索
-	low, high := 0, len(r.index)-1
-	var targetOffset uint32
-	for low <= high {
-		mid := (low + high) / 2
-		cmp := bytes.Compare(r.index[mid].key, key)
-		if cmp == 0 {
-			targetOffset = r.index[mid].offset
-			log.Printf("Found key at offset: %d\n", targetOffset)
-			break
-		} else if cmp < 0 {
-			low = mid + 1
-		} else {
-			high = mid - 1
-		}
+	// 下限探索: index[i].key <= key を満たす最大の i(key を含み得るブロック)を求める
+	i := sort.Search(len(r.index), func(i int) bool {
+		return bytes.Compare(r.index[i].key, key) > 0
+	}) - 1
+	if i < 0 {
+		return nil, 0, false, nil
 	}
+	targetOffset := r.index[i].offset
 
 	_, value, act, err := readValueAtOffset(r.file, targetOffset)
 	if err != nil {
