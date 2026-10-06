@@ -124,7 +124,6 @@ func TestEngine_Layers_ImmutableTombstoneHidesSST(t *testing.T) {
 }
 
 // SSTable が壊れていて読めないときは、panic せず error を返す。
-// SSTable が存在しない場合 (Flush 中など) は error にならず、次の層へ進む。
 func TestEngine_Get_SSTableUnreadable(t *testing.T) {
 	e := newLayerTestEngine(t)
 
@@ -148,12 +147,13 @@ func TestEngine_Get_SSTableUnreadable(t *testing.T) {
 		}
 	})
 
+	// Manifest に載っている SSTable が無いのはデータ損失なので、読み飛ばさず error を返す
 	t.Run("missing file", func(t *testing.T) {
 		if err := os.Remove(files[0]); err != nil {
 			t.Fatal(err)
 		}
-		if val, ok, err := e.Get([]byte("a")); err != nil || ok {
-			t.Errorf("Get(a) = (%q, %v, %v), want (nil, false, nil) when the file does not exist", val, ok, err)
+		if val, ok, err := e.Get([]byte("a")); err == nil {
+			t.Errorf("Get(a) = (%q, %v, nil), want error when a SSTable listed in the Manifest is missing", val, ok)
 		}
 	})
 }
