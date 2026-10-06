@@ -18,11 +18,12 @@ type Writer struct {
 	hasData   bool
 }
 
-// NewWriter は新しい SSTable ライターを作成します
+// NewWriter は新しい SSTable ライターを作成します。
+// 既存のファイルは上書きせず、存在する場合は os.ErrExist を返します。
 func NewWriter(path, file string) (*Writer, error) {
 	// path が存在しない場合は作成
 	os.MkdirAll(path, 0755)
-	f, err := os.Create(filepath.Join(path, file))
+	f, err := os.OpenFile(filepath.Join(path, file), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}

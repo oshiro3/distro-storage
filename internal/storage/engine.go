@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"distro-storage/internal/storage/manifest"
 	"distro-storage/internal/storage/memtable"
 	"distro-storage/internal/storage/sstable"
 	"distro-storage/internal/storage/wal"
@@ -21,13 +22,23 @@ type Engine struct {
 	activeMem    *memtable.Memtable // 現在書き込み中の Memtable
 	immutableMem *memtable.Memtable // Flush中のMemtable
 	wal          *wal.LogWriter
-	sstCount     int
+	manifest     *manifest.Manifest // 有効な L0 SSTable の一覧
 }
 
 func NewEngine(dir string) (*Engine, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	m, err := manifest.Open(filepath.Join(dir, "MANIFEST"))
+	if err != nil {
+		return nil, err
+	}
+
 	walPath := fmt.Sprintf("%s/active.wal", dir)
 	w, err := wal.NewLogWriter(walPath)
 	if err != nil {
+		m.Close()
 		return nil, err
 	}
 
@@ -35,6 +46,12 @@ func NewEngine(dir string) (*Engine, error) {
 		activeMem: memtable.NewMemtable(),
 		dir:       dir,
 		wal:       w, // TODO: ファイル名を連番にする
+		manifest:  m,
+	}
+
+	if err := engine.removeOrphanSSTs(); err != nil {
+		engine.Close()
+		return nil, err
 	}
 
 	// WAL からのリプレイで Memtable を復元
@@ -101,11 +118,11 @@ func (e *Engine) Delete(key []byte) error {
 func (e *Engine) flushImmutableMemtable() {
 	e.mu.Lock()
 	mem := e.immutableMem
-	e.sstCount++
+	num := e.manifest.NextFileNum()
 	path := e.l0Dir()
 	e.mu.Unlock()
 
-	writer, err := sstable.NewWriter(path, sstFileName(e.sstCount))
+	writer, err := sstable.NewWriter(path, sstFileName(num))
 	if err != nil {
 		log.Printf("Error creating SSTable: %v\n", err)
 		return
@@ -121,15 +138,16 @@ func (e *Engine) flushImmutableMemtable() {
 			// エラーが FileSizeOverError かどうかを確認
 			if errors.Is(err, sstable.FileSizeOverError) {
 				// 2. サイズオーバーの場合は、現在のファイルを書き終えてクローズする
-				writer.Finish()
+				if err := e.finishSST(writer, num); err != nil {
+					log.Printf("Error finishing SSTable during split: %v\n", err)
+					return
+				}
 
-				// 3. 次のファイル名のためにアトミックに sstCount を増やす
-				e.mu.Lock()
-				e.sstCount++
-				e.mu.Unlock()
+				// 3. 次のファイル名のために番号を払い出す
+				num = e.manifest.NextFileNum()
 
 				// 4. 新しい Writer 作成する
-				writer, err = sstable.NewWriter(path, sstFileName(e.sstCount))
+				writer, err = sstable.NewWriter(path, sstFileName(num))
 				if err != nil {
 					log.Printf("Error creating new SSTable during split: %v\n", err)
 					return
@@ -144,7 +162,10 @@ func (e *Engine) flushImmutableMemtable() {
 			}
 		}
 	}
-	writer.Finish()
+	if err := e.finishSST(writer, num); err != nil {
+		log.Printf("Error finishing SSTable: %v\n", err)
+		return
+	}
 
 	e.mu.Lock()
 	e.immutableMem = nil
@@ -180,12 +201,9 @@ func (e *Engine) Get(key []byte) (value []byte, found bool, err error) {
 	}
 
 	// 最後に SSTables をチェック
-	for i := e.sstCount; i >= 1; i-- {
+	// Manifest に載っているのは完成済みの SST だけ (新しい順)
+	for _, i := range e.manifest.Files() {
 		val, act, ok, err := e.getFromSST(i, key)
-		if errors.Is(err, os.ErrNotExist) {
-			// sstCount の加算後、ファイルが作られるまでの間に Get が走った場合
-			continue
-		}
 		if err != nil {
 			return nil, false, fmt.Errorf("read SSTable %s: %w", sstFileName(i), err)
 		}
@@ -218,6 +236,36 @@ func (e *Engine) getFromSST(n int, key []byte) ([]byte, sstable.ActType, bool, e
 	return reader.Get(key)
 }
 
+// finishSST は SSTable を完成させ、Manifest に記録して有効にする。
+// Manifest に載るまでは Get から見えず、途中でクラッシュしても孤児ファイルが残るだけで済む。
+func (e *Engine) finishSST(w *sstable.Writer, num int) error {
+	if err := w.Finish(); err != nil {
+		return err
+	}
+	return e.manifest.AddFile(num)
+}
+
+// removeOrphanSSTs は Manifest に載っていない SST (Flush 途中でクラッシュした残骸) を削除する。
+func (e *Engine) removeOrphanSSTs() error {
+	valid := make(map[string]bool)
+	for _, n := range e.manifest.Files() {
+		valid[sstFileName(n)] = true
+	}
+
+	paths, err := filepath.Glob(filepath.Join(e.l0Dir(), "*.sst"))
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		if !valid[filepath.Base(p)] {
+			if err := os.Remove(p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Engine) Close() error {
-	return e.wal.Close()
+	return errors.Join(e.wal.Close(), e.manifest.Close())
 }
