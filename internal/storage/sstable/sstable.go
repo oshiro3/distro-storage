@@ -2,14 +2,9 @@ package sstable
 
 import "errors"
 
-type ActType byte
-
 const (
 	LEVEL_0_MAXFILESIZE = 1024 * 1    // 1KB
 	LEVEL_1_MAXFILESIZE = 1024 * 1024 // 1MB
-
-	ActTypePut ActType = iota
-	ActTypeDelete
 )
 
 // FileSizeOverError は SSTable のファイルサイズが上限を超えた場合のエラーを表す

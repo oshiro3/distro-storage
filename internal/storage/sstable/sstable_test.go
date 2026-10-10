@@ -1,6 +1,7 @@
 package sstable
 
 import (
+	"distro-storage/internal/storage/action"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,7 +23,7 @@ func TestSSTable_Write(t *testing.T) {
 	}
 
 	for _, d := range data {
-		if err := w.Add([]byte(d.k), []byte(d.v), ActTypePut); err != nil {
+		if err := w.Add([]byte(d.k), []byte(d.v), action.ActTypePut); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -47,7 +48,7 @@ func TestWriter_MetaSizeIsFileSize(t *testing.T) {
 	}
 	w.blockSize = 1 // 複数ブロックにして、最終ブロックのサイズとの差を出す
 	for _, k := range []string{"a", "b", "c"} {
-		if err := w.Add([]byte(k), []byte("value-"+k), ActTypePut); err != nil {
+		if err := w.Add([]byte(k), []byte("value-"+k), action.ActTypePut); err != nil {
 			t.Fatal(err)
 		}
 	}
