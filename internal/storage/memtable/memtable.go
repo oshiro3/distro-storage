@@ -2,18 +2,14 @@ package memtable
 
 import (
 	"bytes"
+	"distro-storage/internal/storage/action"
 	"math/rand"
 	"sync"
 )
 
-type ActType byte
-
 const (
 	maxLevel    = 12   // Skip List の最大高さ
 	probability = 0.25 // 新しいレベルを追加する確率
-
-	ActTypePut ActType = iota
-	ActTypeDelete
 )
 
 // Node は Skip List のノードを表します
@@ -26,7 +22,7 @@ type Node struct {
 type Entry struct {
 	Key   []byte
 	Value []byte
-	Act   ActType
+	Act   action.ActType
 }
 
 // Memtable は Skip List を用いたメモリ内キー・バリューストアです
@@ -57,7 +53,7 @@ func (m *Memtable) randomLevel() int {
 
 // Put はキーと値のペアを挿入または更新する
 // SkipList への挿入はソート済みの状態を維持し O(log n) の時間で行われます
-func (m *Memtable) Put(key, value []byte, act ActType) {
+func (m *Memtable) Put(key, value []byte, act action.ActType) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -111,7 +107,7 @@ func (m *Memtable) Put(key, value []byte, act ActType) {
 }
 
 // Get は指定されたキーに対応する値を返します
-func (m *Memtable) Get(key []byte) ([]byte, ActType, bool) {
+func (m *Memtable) Get(key []byte) ([]byte, action.ActType, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

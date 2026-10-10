@@ -1,6 +1,7 @@
 package memtable
 
 import (
+	"distro-storage/internal/storage/action"
 	"testing"
 )
 
@@ -16,13 +17,13 @@ func TestMemtable_PutAndGet(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		m.Put([]byte(c.key), []byte(c.val), ActTypePut)
+		m.Put([]byte(c.key), []byte(c.val), action.ActTypePut)
 	}
 
 	for _, c := range cases {
 		val, act, ok := m.Get([]byte(c.key))
-		if !ok || string(val) != c.val || act != ActTypePut {
-			t.Errorf("expected key %s to have value %s: act is %d, got value %s: act is %d", c.key, c.val, ActTypePut, val, act)
+		if !ok || string(val) != c.val || act != action.ActTypePut {
+			t.Errorf("expected key %s to have value %s: act is %d, got value %s: act is %d", c.key, c.val, action.ActTypePut, val, act)
 		}
 	}
 }
@@ -39,16 +40,16 @@ func TestMemtable_DeleteAndNotGet(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		m.Put([]byte(c.key), []byte(c.val), ActTypePut)
+		m.Put([]byte(c.key), []byte(c.val), action.ActTypePut)
 	}
 
 	for _, c := range cases {
-		m.Put([]byte(c.key), nil, ActTypeDelete)
+		m.Put([]byte(c.key), nil, action.ActTypeDelete)
 	}
 
 	for _, c := range cases {
 		_, act, ok := m.Get([]byte(c.key))
-		if !ok && act != ActTypeDelete {
+		if !ok && act != action.ActTypeDelete {
 			t.Errorf("expected key %s to be present, but it was not", c.key)
 		}
 	}
@@ -57,9 +58,9 @@ func TestMemtable_DeleteAndNotGet(t *testing.T) {
 func TestMemtable_SortedOrder(t *testing.T) {
 	m := NewMemtable()
 	// 順不同で挿入
-	m.Put([]byte("z"), []byte("1"), ActTypePut)
-	m.Put([]byte("a"), []byte("2"), ActTypePut)
-	m.Put([]byte("m"), []byte("3"), ActTypePut)
+	m.Put([]byte("z"), []byte("1"), action.ActTypePut)
+	m.Put([]byte("a"), []byte("2"), action.ActTypePut)
+	m.Put([]byte("m"), []byte("3"), action.ActTypePut)
 
 	// 内部をトラバースしてソートされているか確認
 	var keys []string
@@ -79,9 +80,9 @@ func TestMemtable_SortedOrder(t *testing.T) {
 
 func TestMemtable_Keys(t *testing.T) {
 	m := NewMemtable()
-	m.Put([]byte("cat"), []byte("meow"), ActTypePut)
-	m.Put([]byte("dog"), []byte("bark"), ActTypePut)
-	m.Put([]byte("ant"), []byte("buzz"), ActTypePut)
+	m.Put([]byte("cat"), []byte("meow"), action.ActTypePut)
+	m.Put([]byte("dog"), []byte("bark"), action.ActTypePut)
+	m.Put([]byte("ant"), []byte("buzz"), action.ActTypePut)
 
 	keys := m.Keys()
 	expected := []string{"ant", "cat", "dog"}

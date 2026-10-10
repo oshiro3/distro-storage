@@ -2,6 +2,7 @@ package sstable_test
 
 import (
 	"bytes"
+	"distro-storage/internal/storage/action"
 	"encoding/binary"
 	"errors"
 	"os"
@@ -40,7 +41,7 @@ func buildSST(t *testing.T, padding int, entries []sstable.Entry) (string, []sst
 	written := make([]sstable.Entry, 0, len(entries))
 	for _, e := range entries {
 		e := e
-		if e.Act == sstable.ActTypePut {
+		if e.Act == action.ActTypePut {
 			e.Value = append(append([]byte(nil), e.Value...), bytes.Repeat([]byte{'x'}, padding)...)
 		}
 		if err := w.Add(e.Key, e.Value, e.Act); err != nil && !errors.Is(err, sstable.FileSizeOverError) {
@@ -66,11 +67,11 @@ func openReader(t *testing.T, path string) *sstable.Reader {
 }
 
 func putEntry(key, value string) sstable.Entry {
-	return sstable.Entry{Key: []byte(key), Value: []byte(value), Act: sstable.ActTypePut}
+	return sstable.Entry{Key: []byte(key), Value: []byte(value), Act: action.ActTypePut}
 }
 
 func deleteEntry(key string) sstable.Entry {
-	return sstable.Entry{Key: []byte(key), Act: sstable.ActTypeDelete}
+	return sstable.Entry{Key: []byte(key), Act: action.ActTypeDelete}
 }
 
 // gappedEntries は "b","d","f",...,"p" の 8 エントリ。キー間に必ず隙間がある。
@@ -101,7 +102,7 @@ func TestReader_Get_ExistingKeys(t *testing.T) {
 				if !bytes.Equal(value, e.Value) {
 					t.Errorf("Get(%q): value = %.10q (len %d), want %.10q (len %d)", e.Key, value, len(value), e.Value, len(e.Value))
 				}
-				if act != sstable.ActTypePut {
+				if act != action.ActTypePut {
 					t.Errorf("Get(%q): act = %v, want ActTypePut", e.Key, act)
 				}
 			}

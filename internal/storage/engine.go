@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"distro-storage/internal/storage/action"
 	"distro-storage/internal/storage/manifest"
 	"distro-storage/internal/storage/memtable"
 	"distro-storage/internal/storage/sstable"
@@ -55,15 +56,13 @@ func NewEngine(dir string) (*Engine, error) {
 	}
 
 	// WAL からのリプレイで Memtable を復元
-	err = engine.wal.Replay(func(et wal.EntryType, key, value []byte) {
-		if et == wal.PutType {
-			// Memtable はメモリ上なので、ここでの key/value はコピーして保持
-			k := make([]byte, len(key))
-			v := make([]byte, len(value))
-			copy(k, key)
-			copy(v, value)
-			engine.activeMem.Put(k, v, memtable.ActType(et))
-		}
+	err = engine.wal.Replay(func(act action.ActType, key, value []byte) {
+		// Memtable はメモリ上なので、ここでの key/value はコピーして保持
+		k := make([]byte, len(key))
+		v := make([]byte, len(value))
+		copy(k, key)
+		copy(v, value)
+		engine.activeMem.Put(k, v, act)
 	})
 
 	return engine, err
@@ -73,14 +72,14 @@ func (e *Engine) Put(key, value []byte) error {
 	e.mu.Lock()
 
 	// WAL に書く
-	if err := e.wal.Write(wal.PutType, key, value); err != nil {
+	if err := e.wal.Write(action.ActTypePut, key, value); err != nil {
 		e.mu.Unlock()
 		return err
 	}
 	defer e.mu.Unlock()
 
 	// Memtable に書く
-	e.activeMem.Put(key, value, memtable.ActTypePut)
+	e.activeMem.Put(key, value, action.ActTypePut)
 
 	// サイズチェック
 	// 閾値超過で Flush トリガー
@@ -102,12 +101,12 @@ func (e *Engine) Delete(key []byte) error {
 	defer e.mu.Unlock()
 
 	// WAL に書く
-	if err := e.wal.Write(wal.DeleteType, key, nil); err != nil {
+	if err := e.wal.Write(action.ActTypeDelete, key, nil); err != nil {
 		return err
 	}
 
 	// Memtable に削除マーカー()を追加
-	e.activeMem.Put(key, nil, memtable.ActTypeDelete)
+	e.activeMem.Put(key, nil, action.ActTypeDelete)
 
 	// Delete ではサイズチェックは不要
 
@@ -131,7 +130,7 @@ func (e *Engine) flushImmutableMemtable() {
 	// Memtable から全エントリを取り出して SSTable へ
 	for _, entry := range mem.AllEntries() {
 		// 1. まず現在のWriterへの書き込みを試みる
-		err := writer.Add(entry.Key, entry.Value, sstable.ActType(entry.Act))
+		err := writer.Add(entry.Key, entry.Value, entry.Act)
 
 		// NOTE: Recursive にしてもいいが1回しか再帰しないのでシンプルにループで処理する
 		if err != nil {
@@ -154,7 +153,7 @@ func (e *Engine) flushImmutableMemtable() {
 				}
 
 				// 5. 書き込めなかったエントリを新しいファイルに対して再度書き込む
-				err = writer.Add(entry.Key, entry.Value, sstable.ActType(entry.Act))
+				err = writer.Add(entry.Key, entry.Value, entry.Act)
 				if err != nil {
 					log.Printf("Fatal error writing to new SSTable (entry too large?): %v\n", err)
 					return
@@ -184,7 +183,7 @@ func (e *Engine) Get(key []byte) (value []byte, found bool, err error) {
 
 	// まずActive Memtable をチェック
 	if val, act, ok := e.activeMem.Get(key); ok {
-		if act == memtable.ActTypeDelete {
+		if act == action.ActTypeDelete {
 			return nil, false, nil
 		}
 		return val, true, nil
@@ -193,7 +192,7 @@ func (e *Engine) Get(key []byte) (value []byte, found bool, err error) {
 	// 次いで Immutable Memtable をチェック
 	if e.immutableMem != nil {
 		if val, act, ok := e.immutableMem.Get(key); ok {
-			if act == memtable.ActTypeDelete {
+			if act == action.ActTypeDelete {
 				return nil, false, nil
 			}
 			return val, true, nil
@@ -208,7 +207,7 @@ func (e *Engine) Get(key []byte) (value []byte, found bool, err error) {
 			return nil, false, fmt.Errorf("read SSTable %s: %w", sstFileName(i), err)
 		}
 		if ok {
-			if act == sstable.ActTypeDelete {
+			if act == action.ActTypeDelete {
 				return nil, false, nil
 			}
 			return val, true, nil
@@ -227,7 +226,7 @@ func sstFileName(n int) string {
 }
 
 // getFromSST は n 番目の SSTable からキーを探す。開いた Reader は必ず閉じる
-func (e *Engine) getFromSST(n int, key []byte) ([]byte, sstable.ActType, bool, error) {
+func (e *Engine) getFromSST(n int, key []byte) ([]byte, action.ActType, bool, error) {
 	reader, err := sstable.NewReader(filepath.Join(e.l0Dir(), sstFileName(n)))
 	if err != nil {
 		return nil, 0, false, err

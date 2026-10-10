@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"bytes"
+	"distro-storage/internal/storage/action"
 	"encoding/binary"
 	"io"
 	"os"
@@ -24,7 +25,7 @@ type Reader struct {
 type Entry struct {
 	Key   []byte
 	Value []byte
-	Act   ActType
+	Act   action.ActType
 }
 
 // NewReader は SSTable リーダーを作成します
@@ -104,7 +105,7 @@ func (r *Reader) Next() bool {
 	}
 
 	key, value, act, err := readValueAtOffset(r.file, r.current, r.dataEnd)
-	if err != nil {
+	if err != nil || !validAct(act) {
 		r.head = nil
 		return false
 	}
@@ -156,12 +157,12 @@ func (r *Reader) loadIndex(indexOffset, metaOffset uint32) error {
 	return nil
 }
 
-// Get は key に完全一致するエントリの値と ActType を返します
+// Get は key に完全一致するエントリの値と action.ActType を返します
 //
 //   - key が存在しない場合は found=false, err=nil を返す
-//   - 削除マーカー(ActTypeDelete)も found=true で返す。呼び出し側が ActType で判定する
+//   - 削除マーカー(action.ActTypeDelete)も found=true で返す。呼び出し側が action.ActType で判定する
 //   - I/O エラーやファイルの破損では err != nil を返す。このとき found は無視してよい
-func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
+func (r *Reader) Get(key []byte) ([]byte, action.ActType, bool, error) {
 	// データが無い、または MinKey/MaxKey の範囲外なら I/O なしで not found
 	if r.dataEnd == 0 || bytes.Compare(key, r.meta.MinKey) < 0 || bytes.Compare(key, r.meta.MaxKey) > 0 {
 		return nil, 0, false, nil
@@ -191,6 +192,9 @@ func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 
 		switch cmp := bytes.Compare(k, key); {
 		case cmp == 0:
+			if !validAct(act) {
+				return nil, 0, false, os.ErrInvalid
+			}
 			return value, act, true, nil
 		case cmp > 0:
 			// ソート済みなので、これ以降に key は存在しない
@@ -199,6 +203,11 @@ func (r *Reader) Get(key []byte) ([]byte, ActType, bool, error) {
 	}
 
 	return nil, 0, false, nil
+}
+
+// validAct は SSTable に書かれ得る Act (Put/Delete) かどうかを返す
+func validAct(act action.ActType) bool {
+	return act == action.ActTypePut || act == action.ActTypeDelete
 }
 
 // blockRange は i 番目のデータブロックの範囲 [start, end) を返す
@@ -217,7 +226,7 @@ func (r *Reader) Close() error {
 
 // readValueAtOffset は offset から 1 エントリ [KeySize(4)|Key|ValSize(4)|Val|Act(1)] を読み込む
 // エントリが limit を超える場合は、長さフィールドの破損とみなして os.ErrInvalid を返す
-func readValueAtOffset(f io.ReaderAt, offset, limit uint32) (key, value []byte, actType ActType, err error) {
+func readValueAtOffset(f io.ReaderAt, offset, limit uint32) (key, value []byte, actType action.ActType, err error) {
 	pos, end := uint64(offset), uint64(limit)
 	var u32 [4]byte
 
@@ -260,7 +269,7 @@ func readValueAtOffset(f io.ReaderAt, offset, limit uint32) (key, value []byte, 
 	if err = readAtFull(f, act[:], int64(pos)); err != nil {
 		return nil, nil, 0, err
 	}
-	return key, value, ActType(act[0]), nil
+	return key, value, action.ActType(act[0]), nil
 }
 
 // loadMeta は SSTable のメタデータ (Size/MinKey/MaxKey) を読み込む

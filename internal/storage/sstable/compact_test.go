@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"context"
+	"distro-storage/internal/storage/action"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -14,17 +15,17 @@ func TestCompact_L0_MergeSortedNoDuplicates(t *testing.T) {
 
 	writeSSTable(t, dataDir, 0, "00001.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "red", ActTypePut},
-		{"banana", "yellow", ActTypePut},
+		{"apple", "red", action.ActTypePut},
+		{"banana", "yellow", action.ActTypePut},
 	})
 	writeSSTable(t, dataDir, 0, "00002.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"cherry", "dark-red", ActTypePut},
-		{"date", "brown", ActTypePut},
+		{"cherry", "dark-red", action.ActTypePut},
+		{"date", "brown", action.ActTypePut},
 	})
 
 	count := uint(3)
@@ -54,16 +55,16 @@ func TestCompact_L0_DuplicateKey_NewerFileWins(t *testing.T) {
 	// 古いファイル
 	writeSSTable(t, dataDir, 0, "00001.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "old-value", ActTypePut},
+		{"apple", "old-value", action.ActTypePut},
 	})
 	// 新しいファイル
 	writeSSTable(t, dataDir, 0, "00002.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "new-value", ActTypePut},
+		{"apple", "new-value", action.ActTypePut},
 	})
 
 	count := uint(3)
@@ -82,7 +83,7 @@ func TestCompact_L0_DuplicateKey_NewerFileWins(t *testing.T) {
 	}
 }
 
-// TestCompact_L0_DeleteTombstonePreserved は、最新のエントリが削除マーカー(ActTypeDelete)の場合、
+// TestCompact_L0_DeleteTombstonePreserved は、最新のエントリが削除マーカー(action.ActTypeDelete)の場合、
 // マージ後も削除マーカーとして残ることを確認する(古い値へのフォールバックが起きないこと)。
 func TestCompact_L0_DeleteTombstonePreserved(t *testing.T) {
 	dataDir := t.TempDir()
@@ -90,16 +91,16 @@ func TestCompact_L0_DeleteTombstonePreserved(t *testing.T) {
 	// 古いファイル: Put
 	writeSSTable(t, dataDir, 0, "00001.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "red", ActTypePut},
+		{"apple", "red", action.ActTypePut},
 	})
 	// 新しいファイル: Delete
 	writeSSTable(t, dataDir, 0, "00002.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "", ActTypeDelete},
+		{"apple", "", action.ActTypeDelete},
 	})
 
 	count := uint(3)
@@ -113,8 +114,8 @@ func TestCompact_L0_DeleteTombstonePreserved(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1: %+v", len(got), got)
 	}
-	if got[0].Act != ActTypeDelete {
-		t.Errorf("Act = %v, want ActTypeDelete (tombstone must be preserved)", got[0].Act)
+	if got[0].Act != action.ActTypeDelete {
+		t.Errorf("Act = %v, want action.ActTypeDelete (tombstone must be preserved)", got[0].Act)
 	}
 }
 
@@ -126,16 +127,16 @@ func TestCompact_L0OverridesOverlappingL1(t *testing.T) {
 	// L1: 古いデータ
 	writeSSTable(t, dataDir, 1, "00001.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "l1-old-value", ActTypePut},
+		{"apple", "l1-old-value", action.ActTypePut},
 	})
 	// L0: 新しいデータ(同じキー)
 	writeSSTable(t, dataDir, 0, "00002.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"apple", "l0-new-value", ActTypePut},
+		{"apple", "l0-new-value", action.ActTypePut},
 	})
 
 	count := uint(3)
@@ -162,23 +163,23 @@ func TestCompact_OnlyOverlappingNextLevelFilesIncluded(t *testing.T) {
 	// L1: コンパクト対象
 	writeSSTable(t, dataDir, 1, "00001.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"banana", "l1-value", ActTypePut},
+		{"banana", "l1-value", action.ActTypePut},
 	})
 	// L2: キー範囲が重複するファイル(取り込まれるべき)
 	writeSSTable(t, dataDir, 2, "00002.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"banana", "l2-overlap-value", ActTypePut},
+		{"banana", "l2-overlap-value", action.ActTypePut},
 	})
 	// L2: キー範囲が重複しないファイル(取り込まれるべきではない)
 	writeSSTable(t, dataDir, 2, "00003.sst", []struct {
 		Key, Value string
-		Act        ActType
+		Act        action.ActType
 	}{
-		{"zebra", "l2-nonoverlap-value", ActTypePut},
+		{"zebra", "l2-nonoverlap-value", action.ActTypePut},
 	})
 
 	count := uint(4)
@@ -215,7 +216,7 @@ func TestCompact_EmptyL0_NoOp(t *testing.T) {
 // entries はソート済みであることが呼び出し側の責務。
 func writeSSTable(t *testing.T, dataDir string, level uint, name string, entries []struct {
 	Key, Value string
-	Act        ActType
+	Act        action.ActType
 }) {
 	t.Helper()
 

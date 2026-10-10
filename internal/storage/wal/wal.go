@@ -1,19 +1,13 @@
 package wal
 
 import (
+	"distro-storage/internal/storage/action"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
 	"sync"
-)
-
-type EntryType byte
-
-const (
-	PutType    EntryType = 1
-	DeleteType EntryType = 2
 )
 
 type LogWriter struct {
@@ -32,7 +26,7 @@ func NewLogWriter(path string) (*LogWriter, error) {
 }
 
 // Write: [CRC(4)|KeySize(4)|ValSize(4)|Type(1)][Key...][Val...]
-func (w *LogWriter) Write(entryType EntryType, key, value []byte) error {
+func (w *LogWriter) Write(entryType action.ActType, key, value []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -61,7 +55,7 @@ func (w *LogWriter) Write(entryType EntryType, key, value []byte) error {
 }
 
 // Replay はファイルを最初から読み込み、各エントリに対して引数の関数を適用
-func (w *LogWriter) Replay(apply func(entryType EntryType, key, value []byte)) error {
+func (w *LogWriter) Replay(apply func(entryType action.ActType, key, value []byte)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -83,7 +77,7 @@ func (w *LogWriter) Replay(apply func(entryType EntryType, key, value []byte)) e
 		checksum := binary.LittleEndian.Uint32(header[0:4])
 		kLen := binary.LittleEndian.Uint32(header[4:8])
 		vLen := binary.LittleEndian.Uint32(header[8:12])
-		entryType := EntryType(header[12])
+		entryType := action.ActType(header[12])
 
 		payload := make([]byte, kLen+vLen)
 		if _, err := io.ReadFull(w.file, payload); err != nil {

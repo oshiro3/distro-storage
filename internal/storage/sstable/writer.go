@@ -1,6 +1,7 @@
 package sstable
 
 import (
+	"distro-storage/internal/storage/action"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -35,7 +36,7 @@ func NewWriter(path, file string) (*Writer, error) {
 
 // Add はソート済みのキー・バリューを追加します
 // (呼び出し側がソート済みであることを保証する必要があります)
-func (w *Writer) Add(key, value []byte, act ActType) error {
+func (w *Writer) Add(key, value []byte, act action.ActType) error {
 	// minKey の追跡
 	if !w.hasData {
 		w.minKey = append([]byte(nil), key...)

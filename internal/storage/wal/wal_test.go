@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"distro-storage/internal/storage/action"
 	"path/filepath"
 	"testing"
 )
@@ -17,13 +18,13 @@ func TestWAL_WriteAndReplay(t *testing.T) {
 	}
 
 	testData := []struct {
-		t   EntryType
+		t   action.ActType
 		key string
 		val string
 	}{
-		{PutType, "user:1", "alice"},
-		{PutType, "user:2", "bob"},
-		{DeleteType, "user:1", ""},
+		{action.ActTypePut, "user:1", "alice"},
+		{action.ActTypePut, "user:2", "bob"},
+		{action.ActTypeDelete, "user:1", ""},
 	}
 
 	for _, d := range testData {
@@ -42,7 +43,7 @@ func TestWAL_WriteAndReplay(t *testing.T) {
 	defer w2.Close()
 
 	var replayedEntries []string
-	err = w2.Replay(func(et EntryType, key, value []byte) {
+	err = w2.Replay(func(et action.ActType, key, value []byte) {
 		replayedEntries = append(replayedEntries, string(key))
 	})
 
