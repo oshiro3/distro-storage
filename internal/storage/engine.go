@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"distro-storage/internal/storage/action"
 	"distro-storage/internal/storage/manifest"
 	"distro-storage/internal/storage/memtable"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"fmt"
 	"sync"
@@ -18,12 +20,14 @@ import (
 const MemtableThreshold = 4 * 1024 // 動作確認として 4KB に設定
 
 type Engine struct {
-	mu           sync.RWMutex
-	dir          string
-	activeMem    *memtable.Memtable // 現在書き込み中の Memtable
-	immutableMem *memtable.Memtable // Flush中のMemtable
-	wal          *wal.LogWriter
-	manifest     *manifest.Manifest // 有効な L0 SSTable の一覧
+	mu              sync.RWMutex
+	dir             string
+	activeMem       *memtable.Memtable // 現在書き込み中の Memtable
+	immutableMem    *memtable.Memtable // Flush中のMemtable
+	wal             *wal.LogWriter     // activeMem 用の WAL (世代ごとに NNNNN.wal)
+	walNum          int                // wal の番号
+	immutableWALNum int                // immutableMem に対応する WAL の番号
+	manifest        *manifest.Manifest // 有効な L0 SSTable の一覧
 }
 
 func NewEngine(dir string) (*Engine, error) {
@@ -36,18 +40,17 @@ func NewEngine(dir string) (*Engine, error) {
 		return nil, err
 	}
 
-	walPath := fmt.Sprintf("%s/active.wal", dir)
-	w, err := wal.NewLogWriter(walPath)
-	if err != nil {
-		m.Close()
-		return nil, err
-	}
-
 	engine := &Engine{
 		activeMem: memtable.NewMemtable(),
 		dir:       dir,
-		wal:       w, // TODO: ファイル名を連番にする
 		manifest:  m,
+	}
+
+	// 残っている WAL を古い順に再生して Memtable を復元する。
+	// 最後の WAL はそのまま書き込み先として使い、WAL が無ければ最初の世代を作る。
+	if err := engine.recoverWALs(); err != nil {
+		engine.Close()
+		return nil, err
 	}
 
 	if err := engine.removeOrphanSSTs(); err != nil {
@@ -55,17 +58,79 @@ func NewEngine(dir string) (*Engine, error) {
 		return nil, err
 	}
 
-	// WAL からのリプレイで Memtable を復元
-	err = engine.wal.Replay(func(act action.ActType, key, value []byte) {
-		// Memtable はメモリ上なので、ここでの key/value はコピーして保持
-		k := make([]byte, len(key))
-		v := make([]byte, len(value))
-		copy(k, key)
-		copy(v, value)
-		engine.activeMem.Put(k, v, act)
-	})
+	return engine, nil
+}
 
-	return engine, err
+func walFileName(n int) string {
+	return fmt.Sprintf("%05d.wal", n)
+}
+
+// listWALs は dir 直下の WAL の番号を昇順で返す。
+func listWALs(dir string) ([]int, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "*.wal"))
+	if err != nil {
+		return nil, err
+	}
+	var nums []int
+	for _, p := range paths {
+		var n int
+		if _, err := fmt.Sscanf(filepath.Base(p), "%d.wal", &n); err != nil || filepath.Base(p) != walFileName(n) {
+			continue // 自分が作ったものではないファイルは無視する
+		}
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	return nums, nil
+}
+
+// recoverWALs は残っている WAL を古い順に activeMem へ再生し、最新の WAL を e.wal として開く。
+func (e *Engine) recoverWALs() error {
+	nums, err := listWALs(e.dir)
+	if err != nil {
+		return err
+	}
+	if len(nums) == 0 {
+		nums = []int{1}
+	}
+
+	for _, n := range nums {
+		w, err := wal.NewLogWriter(filepath.Join(e.dir, walFileName(n)))
+		if err != nil {
+			return err
+		}
+		err = w.Replay(func(act action.ActType, key, value []byte) {
+			// Memtable はメモリ上なので、ここでの key/value はコピーして保持
+			e.activeMem.Put(bytes.Clone(key), bytes.Clone(value), act)
+		})
+		if err != nil {
+			w.Close()
+			return fmt.Errorf("replay %s: %w", walFileName(n), err)
+		}
+		if n != nums[len(nums)-1] {
+			if err := w.Close(); err != nil {
+				return err
+			}
+			continue
+		}
+		e.wal, e.walNum = w, n
+	}
+	return nil
+}
+
+// rotateWAL は新しい世代の WAL に書き込み先を切り替える。呼び出し側が e.mu を保持していること。
+// 失敗した場合は、切り替え前の状態のまま返す。
+func (e *Engine) rotateWAL() error {
+	next := e.walNum + 1
+	w, err := wal.NewLogWriter(filepath.Join(e.dir, walFileName(next)))
+	if err != nil {
+		return err
+	}
+	if err := e.wal.Close(); err != nil {
+		w.Close()
+		return err
+	}
+	e.wal, e.walNum = w, next
+	return nil
 }
 
 func (e *Engine) Put(key, value []byte) error {
@@ -84,11 +149,17 @@ func (e *Engine) Put(key, value []byte) error {
 	// サイズチェック
 	// 閾値超過で Flush トリガー
 	if e.activeMem.Size() > MemtableThreshold && e.immutableMem == nil {
+		// Memtable の世代と WAL の世代を揃える。切り替えに失敗したら rotate せず、次の Put で再試行する
+		oldWALNum := e.walNum
+		if err := e.rotateWAL(); err != nil {
+			log.Printf("Error rotating WAL: %v\n", err)
+			return nil
+		}
 		log.Println("Memtable threshold exceeded, flushing to SSTable...")
 		e.immutableMem = e.activeMem
+		e.immutableWALNum = oldWALNum
 		e.activeMem = memtable.NewMemtable()
 
-		//本来はここで WAL も切り替えるが、今回は簡略化して
 		// ImmutableMem を Flush するスレッドを起動
 		go e.flushImmutableMemtable()
 	}
@@ -117,6 +188,7 @@ func (e *Engine) Delete(key []byte) error {
 func (e *Engine) flushImmutableMemtable() {
 	e.mu.Lock()
 	mem := e.immutableMem
+	walNum := e.immutableWALNum
 	num := e.manifest.NextFileNum()
 	path := e.l0Dir()
 	e.mu.Unlock()
@@ -164,6 +236,13 @@ func (e *Engine) flushImmutableMemtable() {
 	if err := e.finishSST(writer, num); err != nil {
 		log.Printf("Error finishing SSTable: %v\n", err)
 		return
+	}
+
+	// SST が Manifest に載ってから、対応する WAL を削除する。
+	// 先に削除すると、削除後にクラッシュしたときに書き込みが失われる。
+	// 削除に失敗しても残るだけで、次回起動時の再生が二重になるが結果は変わらない。
+	if err := os.Remove(filepath.Join(e.dir, walFileName(walNum))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("Error removing flushed WAL: %v\n", err)
 	}
 
 	e.mu.Lock()
