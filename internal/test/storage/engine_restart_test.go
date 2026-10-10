@@ -25,8 +25,11 @@ func restart(t *testing.T, e *testEngine) *testEngine {
 	if err := e.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
 	}
-	if err := os.Remove(filepath.Join(e.dir, "active.wal")); err != nil {
-		t.Fatalf("remove WAL: %v", err)
+	wals, _ := filepath.Glob(filepath.Join(e.dir, "*.wal"))
+	for _, p := range wals {
+		if err := os.Remove(p); err != nil {
+			t.Fatalf("remove WAL: %v", err)
+		}
 	}
 
 	e2, err := storage.NewEngine(e.dir)
